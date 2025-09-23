@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from io import BytesIO
 
 # Load environment variables
 load_dotenv()
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 API_KEY = os.getenv("OPENAI_API_KEY", "")
 ENDPOINT = "https://api.openai.com/v1/images/edits"
 MODEL = "gpt-image-1"
-OUTPUT_FILE = "edited_image.jpg"
+OUTPUT_FILE = "edited_image.png"
 
 # Supabase Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -157,27 +158,22 @@ def upload_to_supabase(image_data: bytes, filename: str) -> dict:
     if not supabase:
         logger.warning("Supabase client not available, skipping upload")
         return {"uploaded": False, "url": None, "message": "Supabase not configured"}
-    
+
     try:
-        # Upload to Supabase storage
         logger.info(f"Uploading {filename} to Supabase storage bucket '{STORAGE_BUCKET}'")
-        
-        # Try to upload the file with upsert option to handle duplicates
-        response = supabase.storage.from_(STORAGE_BUCKET).upload(
-            path=filename,
-            file=image_data,
-            file_options={
-                "content-type": "image/png",
-                "upsert": False  # Allow overwriting if file exists
-            }
-        )
-        
-        # Check if upload was successful
-        if hasattr(response, 'data') and response.data:
-            # Get the public URL
+
+        # Pass image_data directly as bytes to Supabase storage
+
+        response = supabase.storage.from_(STORAGE_BUCKET).upload(filename, image_data, {
+            'content-type' : 'image/png',
+            'upsert' : 'true'
+        })
+
+        # Check response type - response is an UploadResponse object
+        if hasattr(response, 'full_path') and response.full_path:
             public_url = supabase.storage.from_(STORAGE_BUCKET).get_public_url(filename)
             logger.info(f"✅ Successfully uploaded to Supabase: {public_url}")
-            
+
             return {
                 "uploaded": True,
                 "url": public_url,
@@ -185,27 +181,13 @@ def upload_to_supabase(image_data: bytes, filename: str) -> dict:
                 "bucket": STORAGE_BUCKET,
                 "message": "Successfully uploaded to Supabase storage"
             }
-        elif hasattr(response, 'error') and response.error:
-            error_msg = str(response.error)
-            logger.error(f"❌ Supabase upload error: {error_msg}")
-            return {"uploaded": False, "url": None, "message": f"Upload error: {error_msg}"}
-        else:
-            logger.error("Failed to upload to Supabase - unexpected response format")
-            return {"uploaded": False, "url": None, "message": "Upload failed - unexpected response"}
-            
+
+        logger.error(f"❌ Unexpected Supabase response: {response}")
+        return {"uploaded": False, "url": None, "message": f"Unexpected response: {response}"}
+
     except Exception as e:
-        error_details = str(e)
-        logger.error(f"❌ Error uploading to Supabase: {error_details}")
-        
-        # Check if it's an RLS policy error
-        if "row-level security policy" in error_details.lower() or "403" in error_details:
-            return {
-                "uploaded": False, 
-                "url": None, 
-                "message": "Storage access denied - please check bucket permissions and RLS policies"
-            }
-        
-        return {"uploaded": False, "url": None, "message": f"Upload error: {error_details}"}
+        logger.error(f"❌ Error uploading to Supabase: {e}")
+        return {"uploaded": False, "url": None, "message": f"Upload error: {e}"}
 
 def edit_image(image_data, prompt, image_url=None):
     """Send image to OpenAI API for editing"""
@@ -216,7 +198,7 @@ def edit_image(image_data, prompt, image_url=None):
     if image_url:
         image_content_type = get_content_type_from_url(image_url)
     else:
-        image_content_type = "image/jpeg"  # default fallback
+        image_content_type = "image/png"  # default fallback
 
     files = {"image": ("image", image_data, image_content_type)}
 
@@ -335,7 +317,7 @@ async def edit_image_stream_endpoint(request: ImageRequest):
         
         return StreamingResponse(
             BytesIO(edited_image), 
-            media_type="image/jpeg",
+            media_type="image/png",
             headers={"Content-Disposition": "attachment; filename=edited_image.jpg"}
         )
     except HTTPException as e:
