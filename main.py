@@ -16,6 +16,7 @@ from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from io import BytesIO
+from PIL import Image
 
 # Load environment variables
 load_dotenv()
@@ -153,6 +154,43 @@ def download_image_from_url(url):
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=400, detail=f"Failed to download image from URL {url}: {e}")
 
+def optimize_image_to_jpg(image_data: bytes, quality: int = 85) -> bytes:
+    """Convert and optimize image to JPG format with compression while preserving original resolution"""
+    try:
+        # Open image from bytes
+        image = Image.open(BytesIO(image_data))
+        original_size_info = f"{image.width}x{image.height}"
+        
+        # Convert to RGB if necessary (PNG with transparency, etc.)
+        if image.mode in ('RGBA', 'LA', 'P'):
+            # Create white background for transparent images
+            background = Image.new('RGB', image.size, (255, 255, 255))
+            if image.mode == 'P':
+                image = image.convert('RGBA')
+            if image.mode in ('RGBA', 'LA'):
+                background.paste(image, mask=image.split()[-1])  # Use alpha channel as mask
+                image = background
+        elif image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        # Save as JPG with compression (keeping original resolution)
+        output_buffer = BytesIO()
+        image.save(output_buffer, format='JPEG', quality=quality, optimize=True)
+        optimized_data = output_buffer.getvalue()
+        
+        # Log compression results
+        original_size = len(image_data)
+        optimized_size = len(optimized_data)
+        compression_ratio = (1 - optimized_size / original_size) * 100
+        logger.info(f"Image optimized ({original_size_info}): {original_size:,} bytes → {optimized_size:,} bytes ({compression_ratio:.1f}% reduction)")
+        
+        return optimized_data
+        
+    except Exception as e:
+        logger.error(f"Error optimizing image: {e}")
+        # Return original data if optimization fails
+        return image_data
+
 def upload_to_supabase(image_data: bytes, filename: str) -> dict:
     """Upload image to Supabase storage and return the public URL"""
     if not supabase:
@@ -165,7 +203,7 @@ def upload_to_supabase(image_data: bytes, filename: str) -> dict:
         # Pass image_data directly as bytes to Supabase storage
 
         response = supabase.storage.from_(STORAGE_BUCKET).upload(filename, image_data, {
-            'content-type' : 'image/png',
+            'content-type' : 'image/jpeg',
             'upsert' : 'true'
         })
 
@@ -270,13 +308,17 @@ async def edit_image_endpoint(request: ImageRequest):
         logger.info(f"Received prompt: {request.prompt}")
         edited_image = edit_image(image_data, request.prompt, image_url_str)
         
+        # Optimize image to JPG format for smaller file size
+        logger.info("Optimizing image to JPG format...")
+        optimized_image = optimize_image_to_jpg(edited_image)
+        
         # Generate unique filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         unique_id = str(uuid.uuid4())[:8]
         filename = f"edited_image_{timestamp}_{unique_id}.jpg"
         
-        # Upload to Supabase storage
-        storage_result = upload_to_supabase(edited_image, filename)
+        # Upload optimized image to Supabase storage
+        storage_result = upload_to_supabase(optimized_image, filename)
         
         if storage_result["uploaded"]:
             return ImageResponse(
@@ -315,9 +357,13 @@ async def edit_image_stream_endpoint(request: ImageRequest):
         logger.info(f"Received prompt: {request.prompt}")
         edited_image = edit_image(image_data, request.prompt, image_url_str)
         
+        # Optimize image to JPG format for smaller file size
+        logger.info("Optimizing image to JPG format...")
+        optimized_image = optimize_image_to_jpg(edited_image)
+        
         return StreamingResponse(
-            BytesIO(edited_image), 
-            media_type="image/png",
+            BytesIO(optimized_image), 
+            media_type="image/jpeg",
             headers={"Content-Disposition": "attachment; filename=edited_image.jpg"}
         )
     except HTTPException as e:
